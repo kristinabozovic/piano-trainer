@@ -16,7 +16,7 @@
 (defn evaluate-rhythm
       [expected played tolerance]
       (let [differences (calculate-deviations expected played)
-            average (double (/ (reduce + differences) (count differences)))]
+            average (double (/ (reduce + differences) (* 1.0 (count differences))))]
            (if (<= average tolerance)
              (str "Rhythm is accurate. Average deviations: "  average " ms")
              (str "Rhythm is inaccurate. Average deviation: " average " ms"))))
