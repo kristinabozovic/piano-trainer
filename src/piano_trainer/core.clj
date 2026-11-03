@@ -39,3 +39,37 @@
     (.start line)
     (println "I'm listening the microfone so play something on the piano!")
     line))
+
+(defn read-audio-stream [^TargetDataLine line]
+  (let [buffer-size 1024
+        buffer (byte-array buffer-size)]
+    (println "Audio stream reading started, so you can play something...")
+    (future
+      (try
+        (while (.isOpen line)
+          (let [bytes-read (.read line buffer 0 buffer-size)]
+            (when (> bytes-read 0)
+              ;;izracunavanje jacine zvuka iz 16bitnog uzorka
+              (let [max-amplitude (loop [i 0 max-val 0]
+                                    (if (>= i bytes-read)
+                                      max-val
+                                      (let [b1 (aget buffer i)
+                                            b2 (aget buffer (+ i 1))
+                                            sample (bit-or (bit-shift-left (bit-and b2 255) 8)
+                                                           (bit-and b1 255))
+                                            signed-sample (if (> sample 32767) (- sample 65536) sample)
+                                            abs-val (abs (long signed-sample))]
+                                        (recur (+ i 2) (max max-val abs-val)))))]
+                ;;jacinaaa > prag -> onda je deaktiviran zvuk
+                (when (> max-amplitude 1000)
+                  (println "Sound detected. Amplitude: " max-amplitude))
+                )
+              )))
+        (catch Exception e
+          (println "ERROR DETAILS:" (.getMessage e))
+          (.printStackTrace e)
+          )))))
+
+;; (def line (start-listening))  starting microfone and savingline in variable
+;; (def stream (read-audio-stream line)) to start reading audio stream in background thread
+;; (.close line)
