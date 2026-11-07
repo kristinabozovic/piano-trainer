@@ -21,4 +21,9 @@
              (is (str/includes? result "inaccurate"))))
          )
 
+(deftest test-bytes-to-max-amplitude
+  (testing "Calculates max amplitude correctly from 16 bit byte array"
+    (is (= 0 (bytes-to-max-amplitude (byte-array [0 0]) 2)))))
+
+
 ;; za pokretanje (run-tests 'piano-trainer.core-test)
