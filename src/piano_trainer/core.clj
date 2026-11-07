@@ -91,3 +91,11 @@
 ;; (def line (start-listening))  starting microfone and savingline in variable
 ;; (def stream (read-audio-stream line)) to start reading audio stream in background thread
 ;; (.close line)
+
+(defn stop-and-evaluate [line expected tolerance]
+  (.close line)
+  (let [result (evaluate-rhythm expected @recorded-rhythm tolerance)]
+    (println "RESULT OF PRACTISING:")
+    (println result)
+    result))
+;;(stop-and-evaluate line expected-rhythm 100)
