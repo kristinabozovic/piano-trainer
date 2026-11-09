@@ -88,14 +88,43 @@
           (.printStackTrace e)
           )))))
 
-;; (def line (start-listening))  starting microfone and savingline in variable
-;; (def stream (read-audio-stream line)) to start reading audio stream in background thread
-;; (.close line)
 
-(defn stop-and-evaluate [line expected tolerance]
+(require '[clojure.java.io :as io])
+
+(defn save-session-to-filee [expected played filename]
+  (let [session-data {:timestamp  (System/currentTimeMillis)
+                      :expected   expected
+                      :played     played
+                      :deviations (calculate-deviations expected played)}]
+    ;;write to a file in EDN format and move to a new line
+    (spit filename (str (pr-str session-data) "\n") :append true)
+    (println "Session is successfully saved to a file: " filename)))
+
+
+(defn stop-and-evaluate [line expected tolerance filename]
   (.close line)
   (let [result (evaluate-rhythm expected @recorded-rhythm tolerance)]
     (println "RESULT OF PRACTISING:")
     (println result)
+    (save-session-to-filee expected @recorded-rhythm filename)
     result))
-;;(stop-and-evaluate line expected-rhythm 100)
+
+;;(def line (start-listening))
+;;(def stream (read-audio-stream line))
+;;(stop-and-evaluate line expected-rhythm 100 "dataset.edn")
+
+(defn load-dataset [filename]
+  (try
+    (with-open [rdr (io/reader filename)]
+      (->> (line-seq rdr)                                   ;;reading line by line, transforming string into map
+           (remove clojure.string/blank?)
+           (map read-string)
+           vec))
+    (catch java.io.FileNotFoundException e
+           (println  "File is not found: " (.getMessage e))
+      [])
+    (catch Exception e
+      (println "ERROR during reading file: " (.getMessage e))
+      [])))
+;;(def loaded-data (load-dataSset "dataset.edn"))
+;;(map :played loaded-data)
