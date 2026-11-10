@@ -24,14 +24,14 @@
 (import '[javax.sound.sampled AudioSystem TargetDataLine AudioFormat DataLine$Info])
 
 (defn test-microphone []
-  (let [format (AudioFormat. 44100.0 16 1 true true)
+  (let [format (AudioFormat. 48000.0 16 1 true false)
         info (DataLine$Info. TargetDataLine format)]
     (if (AudioSystem/isLineSupported info)
       (println "Microphone is supported and ready.")
       (println "Microphone's line is not supported with this format."))))
 
 (defn start-listening []
-  (let [format (AudioFormat. 44100.0 16 1 true true)
+  (let [format (AudioFormat. 48000.0 16 1 true false)
         info (DataLine$Info. TargetDataLine format)
         ^TargetDataLine line (AudioSystem/getLine info)]
     (.open line format)
@@ -53,10 +53,18 @@
             abs-val (abs (long signed-sample))]
         (recur (+ i 2) (max max-val abs-val))))))
 
+(def session-start-time (atom nil))
+(def recorded-rhythm (atom []))
 
 (defn read-audio-stream [^TargetDataLine line]
   (let [buffer-size 1024
-        buffer (byte-array buffer-size)]
+        buffer (byte-array buffer-size)
+        cooldown-ms 200                                     ;;min time between 2 impacts u ms
+        last-hit-time (atom 0)]
+
+    (reset! session-start-time (System/currentTimeMillis))
+    (reset! recorded-rhythm [])
+
     (println "Audio stream reading started, so you can play something...")
     (future
       (try
@@ -64,17 +72,59 @@
           (let [bytes-read (.read line buffer 0 buffer-size)]
             (when (> bytes-read 0)
               ;;izracunavanje jacine zvuka iz 16bitnog uzorka
-              (let [max-amplitude (bytes-to-max-amplitude buffer bytes-read)]
-                ;;jacinaaa > prag -> onda je detektovan zvuk
-                (when (> max-amplitude 1000)
-                  (println "Sound detected. Amplitude: " max-amplitude))
+              (let [max-amplitude (bytes-to-max-amplitude buffer bytes-read)
+                    current-time (System/currentTimeMillis)]
+                (when (and (> max-amplitude 150)
+                           (> (- current-time @last-hit-time) cooldown-ms))
+                  ;;noting time of impact relative to the start
+                  (reset! last-hit-time current-time)
+                  (let [relative-time (- current-time @session-start-time)]
+                    (swap! recorded-rhythm conj relative-time)
+                    (println "Note detected. Time: " relative-time "ms, Aplitude: " max-amplitude)))
                 )
               )))
         (catch Exception e
-          (println "ERROR DETAILS:" (.getMessage e))
+          (println "ERROR:" (.getMessage e))
           (.printStackTrace e)
           )))))
 
-;; (def line (start-listening))  starting microfone and savingline in variable
-;; (def stream (read-audio-stream line)) to start reading audio stream in background thread
-;; (.close line)
+
+(require '[clojure.java.io :as io])
+
+(defn save-session-to-filee [expected played filename]
+  (let [session-data {:timestamp  (System/currentTimeMillis)
+                      :expected   expected
+                      :played     played
+                      :deviations (calculate-deviations expected played)}]
+    ;;write to a file in EDN format and move to a new line
+    (spit filename (str (pr-str session-data) "\n") :append true)
+    (println "Session is successfully saved to a file: " filename)))
+
+
+(defn stop-and-evaluate [line expected tolerance filename]
+  (.close line)
+  (let [result (evaluate-rhythm expected @recorded-rhythm tolerance)]
+    (println "RESULT OF PRACTISING:")
+    (println result)
+    (save-session-to-filee expected @recorded-rhythm filename)
+    result))
+
+;;(def line (start-listening))
+;;(def stream (read-audio-stream line))
+;;(stop-and-evaluate line expected-rhythm 100 "dataset.edn")
+
+(defn load-dataset [filename]
+  (try
+    (with-open [rdr (io/reader filename)]
+      (->> (line-seq rdr)                                   ;;reading line by line, transforming string into map
+           (remove clojure.string/blank?)
+           (map read-string)
+           vec))
+    (catch java.io.FileNotFoundException e
+           (println  "File is not found: " (.getMessage e))
+      [])
+    (catch Exception e
+      (println "ERROR during reading file: " (.getMessage e))
+      [])))
+;;(def loaded-data (load-dataSset "dataset.edn"))
+;;(map :played loaded-data)
