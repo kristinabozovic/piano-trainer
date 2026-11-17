@@ -1,9 +1,8 @@
 (ns piano-trainer.core
-  (:require [clojure.string :as str])
-  (:import (javax.sound.sampled DataLine$Info)))
-;; Expected and actual rhythm in milliseconds
-(def expected-rhythm [0 500 1000 1500])
-(def played-rhythm [10 520 980 1550])
+  (:require [clojure.string :as str]
+            [clojure.java.io :as io])
+  (:import (javax.sound.sampled AudioSystem TargetDataLine AudioFormat DataLine$Info)
+           (javax.sound.midi MidiSystem ShortMessage)))
 
 ;; Deviation for each note (abs error)
 (defn calculate-deviations
@@ -21,14 +20,72 @@
              (str "Rhythm is accurate. Average deviations: "  average " ms")
              (str "Rhythm is inaccurate. Average deviation: " average " ms"))))
 
-(import '[javax.sound.sampled AudioSystem TargetDataLine AudioFormat DataLine$Info])
+(defn normalize-rhythm [rhythm-vector]
+  (if (empty? rhythm-vector)
+       []
+       (let [first-time (first rhythm-vector)]
+         (mapv #(- % first-time) rhythm-vector))))          ;;first strike always begins at 0
 
-(defn test-microphone []
-  (let [format (AudioFormat. 48000.0 16 1 true false)
-        info (DataLine$Info. TargetDataLine format)]
-    (if (AudioSystem/isLineSupported info)
-      (println "Microphone is supported and ready.")
-      (println "Microphone's line is not supported with this format."))))
+
+(defn generate-metronome-rhythm [bpm beats-per-mesure total-measuures]
+  (let [interval-ms (/ 60000.0 bpm)
+        total-beats (* beats-per-mesure total-measuures)]
+    ;;retrun array ms for every beats grouped by measure
+    (mapv #(int (* % interval-ms)) (range total-beats))))
+
+(defn load-midi-sequence [filepath]
+  (MidiSystem/getSequence (io/file filepath)))
+
+;;extracts all midi events from one track as seq
+(defn track-events [track]
+  (map #(.get track %) (range (.size track))))
+
+;; is event real note's stroke
+(defn note-on-event? [event]
+  (let [msg (.getMessage event)]
+    (and (instance? ShortMessage msg)
+         (= ShortMessage/NOTE_ON (.getCommand ^ShortMessage msg))
+         (pos? (.getData2 ^ShortMessage msg)))))
+
+(defn tick-ms [tick resolution tempo]
+  (long (/ (* tick tempo) (* resolution 1000))))
+
+(defn parse-midi-to-rhythm
+  ([filepath] (parse-midi-to-rhythm filepath 120))
+  ([filepath bpm]
+   (try
+     (let [sequence (load-midi-sequence filepath)
+           resolution (.getResolution sequence)
+           tempo (long (/ 60000000 bpm))]
+       (->> (.getTracks sequence)
+            (mapcat track-events)
+            (filter note-on-event?)
+            (map #(.getTick %))
+            (map #(tick-ms % resolution tempo))
+            distinct
+            sort
+            vec
+            normalize-rhythm))
+     (catch Exception e
+       (println "ERROR during reading file: " (.getMessage e))
+       []))))
+
+(defn discover-midi-songs [dir-path]
+  (let [dir (io/file dir-path)]
+    (if (.exists dir)
+      (->> (file-seq dir)
+           (filter #(and (.isFile %) (.endsWith (.getName %) ".mid")))
+           (reduce (fn [acc file]
+                     (let [filename (.getName file)
+                           composer (.getName (.getParentFile file))
+                           song-key (keyword (clojure.string/replace filename #"\.mid$" ""))]
+                       (assoc acc song-key {:title filename
+                                            :composer composer
+                                            :path (.getAbsolutePath file)
+                                            :default-bpm 120})))
+                   {}))
+      (do (println "Folder doesn't exist") {}))))
+
 
 (defn start-listening []
   (let [format (AudioFormat. 48000.0 16 1 true false)
@@ -59,8 +116,9 @@
 (defn read-audio-stream [^TargetDataLine line]
   (let [buffer-size 1024
         buffer (byte-array buffer-size)
-        cooldown-ms 200                                     ;;min time between 2 impacts u ms
-        last-hit-time (atom 0)]
+        cooldown-ms 250
+        last-hit-time (atom 0)
+        previous-amplitude (atom 0)]                        ;;for jump measurement
 
     (reset! session-start-time (System/currentTimeMillis))
     (reset! recorded-rhythm [])
@@ -73,23 +131,22 @@
             (when (> bytes-read 0)
               ;;izracunavanje jacine zvuka iz 16bitnog uzorka
               (let [max-amplitude (bytes-to-max-amplitude buffer bytes-read)
-                    current-time (System/currentTimeMillis)]
-                (when (and (> max-amplitude 150)
+                    current-time (System/currentTimeMillis)
+                    amplitude-jump (- max-amplitude @previous-amplitude)]
+
+                (reset! previous-amplitude max-amplitude)
+                (when (and (or (> max-amplitude 200) (> amplitude-jump 100))
                            (> (- current-time @last-hit-time) cooldown-ms))
                   ;;noting time of impact relative to the start
-                  (reset! last-hit-time current-time)
                   (let [relative-time (- current-time @session-start-time)]
-                    (swap! recorded-rhythm conj relative-time)
-                    (println "Note detected. Time: " relative-time "ms, Aplitude: " max-amplitude)))
-                )
-              )))
+                    (when (> relative-time 2000)
+                      (reset! last-hit-time current-time)   ;;ifnore first 2sec
+                      (swap! recorded-rhythm conj relative-time)
+                      (println "Note detected. Time: " relative-time "ms, Amplitude: " max-amplitude ", Jump: " amplitude-jump))))))))
         (catch Exception e
           (println "ERROR:" (.getMessage e))
-          (.printStackTrace e)
-          )))))
+          (.printStackTrace e))))))
 
-
-(require '[clojure.java.io :as io])
 
 (defn save-session-to-filee [expected played filename]
   (let [session-data {:timestamp  (System/currentTimeMillis)
@@ -103,15 +160,15 @@
 
 (defn stop-and-evaluate [line expected tolerance filename]
   (.close line)
-  (let [result (evaluate-rhythm expected @recorded-rhythm tolerance)]
+  (let [played-count (count @recorded-rhythm)
+        trimmed-expected (vec (take played-count expected))
+        norm-expected (normalize-rhythm trimmed-expected)
+        norm-played (normalize-rhythm @recorded-rhythm)
+        result (evaluate-rhythm norm-expected norm-played tolerance)]
     (println "RESULT OF PRACTISING:")
     (println result)
-    (save-session-to-filee expected @recorded-rhythm filename)
+    (save-session-to-filee norm-expected norm-played filename)
     result))
-
-;;(def line (start-listening))
-;;(def stream (read-audio-stream line))
-;;(stop-and-evaluate line expected-rhythm 100 "dataset.edn")
 
 (defn load-dataset [filename]
   (try
@@ -126,5 +183,18 @@
     (catch Exception e
       (println "ERROR during reading file: " (.getMessage e))
       [])))
+
+;;(def all-songs (discover-midi-songs "midi"))
+;;(def current-expected-rhythm (parse-midi-to-rhythm (:path (:bach_846 all-songs)) 120))
+
+
 ;;(def loaded-data (load-dataSset "dataset.edn"))
 ;;(map :played loaded-data)
+
+;;(def current-song (:fur-elize songs))
+;;(stop-and-evaluate line current-song 100 "dataset.edn")
+
+;;(def current-expected-rhythm (generate-metronome-rhythm 120 3 10))
+;;(def line (start-listening))
+;;(def stream (read-audio-stream line))
+;;(stop-and-evaluate line current-expected-rhythm 400 "dataset.edn")
