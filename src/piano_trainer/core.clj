@@ -2,7 +2,11 @@
   (:require [clojure.string :as str]
             [clojure.java.io :as io])
   (:import (javax.sound.sampled AudioSystem TargetDataLine AudioFormat DataLine$Info)
-           (javax.sound.midi MidiSystem ShortMessage)))
+           (javax.sound.midi MidiSystem ShortMessage)
+           (java.net.http HttpClient HttpRequest HttpRequest$BodyPublishers HttpResponse HttpResponse$BodyHandlers)
+           (java.net URI)))
+
+
 
 ;; Deviation for each note (abs error)
 (defn calculate-deviations
@@ -158,16 +162,94 @@
     (println "Session is successfully saved to a file: " filename)))
 
 
+
+
+
+(defn escape-json-str [s]
+  (-> (str s)
+      (str/replace "\\" "\\\\")
+      (str/replace "\"" "\\\"")
+      (str/replace "\n" "\\n")
+      (str/replace "\r" "")))
+
+(defn build-agent-prompt [expected played deviation]
+  (str "I'm a student who's practising rhythm on piano. "
+       "Expected rhythm (ms): " (vec expected) ". "
+       "Played rhythm (ms): " (vec played) ". "
+       "Average deviation: " (format "%.1f" (double deviation)) " ms. "
+       "Reply in at most 3 short sentences, where deviations were and give me advice for practising."))
+
+(defn build-chat-request-body [model-name prompt]
+  (str "{\"model\":\"" (escape-json-str model-name) "\","
+       "\"messages\":[{\"role\":\"user\",\"content\":\"" (escape-json-str prompt) "\"}],"
+       "\"max-tokens\":140,"
+       "\"temperature\":0.5}"))
+
+(defn extract-assistent-content [response-body]
+  (let [s (str response-body)
+        marker "\"content\": \""
+        start-idx (.indexOf s marker)]
+    (if (neg? start-idx)
+      s
+      (let [val-start (+ start-idx (count marker))
+            val-end (.indexOf s "\"" val-start)]
+        (if (neg? val-end)
+          s
+          (-> (subs s val-start val-end)
+              (str/replace "\\n" "\n")
+              (str/replace "\\\"" "\"")
+              (str/replace "\\\\" "\\")))))))
+
+(defn compute-average-deviation [expected played]
+  (let [diffs (calculate-deviations expected played)]
+    (if (seq diffs)
+      (/ (reduce + diffs) (* 1.0 (count diffs)))
+      0.0)))
+
+(defn post-chat-completion [api-url json-body]
+  (let [client (.build (HttpClient/newBuilder))
+        request (-> (HttpRequest/newBuilder)
+                    (.uri (URI/create api-url))
+                    (.header "Content-Type" "application/json")
+                    (.POST (HttpRequest$BodyPublishers/ofString json-body))
+                    (.build))
+        response (.send client request (HttpResponse$BodyHandlers/ofString))]
+    {:status (.statusCode response)
+     :body (.body response)}))
+
+(defn ask-ai-agent
+  ([expected played deviation]
+   (ask-ai-agent expected played deviation "http://localhost:1235/v1/chat/completions" "local-model"))
+  ([expected played deviation api-url model-name]
+   (try
+     (let [prompt (build-agent-prompt expected played deviation)
+           body (build-chat-request-body model-name prompt)
+           {:keys [status body]} (post-chat-completion api-url body)]
+       (if (<= 200 status 299)
+         (extract-assistent-content body)
+         (str "API HTTP ERROR (" status "): " body)))
+     (catch Exception e
+       (str "ERROR during loading with local ai server: " (.getMessage e))))))
+;;(ask-ai-agent [0 500 1000 1500]
+;              [0 530 970 1580]
+;              32.5
+;              "http://localhost:1235/v1/chat/completions"
+;              "google/gemma-4-e2b")
+
+
 (defn stop-and-evaluate [line expected tolerance filename]
   (.close line)
   (let [played-count (count @recorded-rhythm)
         trimmed-expected (vec (take played-count expected))
         norm-expected (normalize-rhythm trimmed-expected)
         norm-played (normalize-rhythm @recorded-rhythm)
-        result (evaluate-rhythm norm-expected norm-played tolerance)]
+        result (evaluate-rhythm norm-expected norm-played tolerance)
+        avg-dev (compute-average-deviation norm-expected norm-played)]
     (println "RESULT OF PRACTISING:")
     (println result)
     (save-session-to-filee norm-expected norm-played filename)
+    (println "\nAI AGENT:")
+    (println (ask-ai-agent norm-expected norm-played avg-dev))
     result))
 
 (defn load-dataset [filename]
@@ -187,14 +269,16 @@
 ;;(def all-songs (discover-midi-songs "midi"))
 ;;(def current-expected-rhythm (parse-midi-to-rhythm (:path (:bach_846 all-songs)) 120))
 
-
 ;;(def loaded-data (load-dataSset "dataset.edn"))
 ;;(map :played loaded-data)
-
-;;(def current-song (:fur-elize songs))
-;;(stop-and-evaluate line current-song 100 "dataset.edn")
 
 ;;(def current-expected-rhythm (generate-metronome-rhythm 120 3 10))
 ;;(def line (start-listening))
 ;;(def stream (read-audio-stream line))
 ;;(stop-and-evaluate line current-expected-rhythm 400 "dataset.edn")
+
+;;AI AGENT
+;;(def expected (generate-metronome-rhythm 120 4 1))
+;;(def line (start-listening))
+;;(def stream (read-audio-stream line))
+;;(stop-and-evaluate line expected 150 "dataset.edn")
